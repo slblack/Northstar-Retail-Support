@@ -38,7 +38,16 @@ def main() -> int:
 
     from .tls import configure_extra_cas
 
-    configure_extra_cas(os.environ.get("NORTHSTAR_EXTRA_CA_DIR"))
+    added = configure_extra_cas(os.environ.get("NORTHSTAR_EXTRA_CA_DIR"))
+    if added == 0:
+        log.info("No extra CA certificates supplied; using the standard trust store.")
+    from .tls import relax_strict_enabled
+
+    if relax_strict_enabled():
+        log.warning(
+            "NORTHSTAR_TLS_RELAX_X509_STRICT is on: OpenAI connections still require a trusted chain and "
+            "matching hostname, but Python's extra strict X.509 profile checks are relaxed."
+        )
 
     from .app import create_app
     from .security import is_loopback_bind
