@@ -33,6 +33,41 @@ def _base_bundle() -> str:
         return ""
 
 
+RELAX_ENV = "NORTHSTAR_TLS_RELAX_X509_STRICT"
+
+
+def relax_strict_enabled() -> bool:
+    return os.environ.get(RELAX_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def relaxed_strict_context():
+    """Opt-in SSLContext for networks whose inspection CA fails Python 3.13's strict X.509 profile.
+
+    Python 3.13 sets ``ssl.VERIFY_X509_STRICT`` by default, which rejects some otherwise trusted
+    corporate CAs (for example a CA certificate without a keyUsage extension, or a leaf without an
+    authority key identifier). When ``NORTHSTAR_TLS_RELAX_X509_STRICT=1`` is set, this returns a
+    context that still requires a trusted chain (standard roots plus any extra CAs), valid dates and
+    a matching hostname (``CERT_REQUIRED``, ``check_hostname``) — only the extra strict-profile
+    checks are cleared. Returns ``None`` when the option is off.
+    """
+    import ssl
+
+    if not relax_strict_enabled():
+        return None
+    cafile = os.environ.get("SSL_CERT_FILE") or None
+    ctx = ssl.create_default_context(cafile=cafile)
+    if cafile is None:
+        try:
+            import certifi
+
+            ctx.load_verify_locations(cafile=certifi.where())
+        except Exception:  # noqa: BLE001
+            pass
+    ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+    return ctx
+
+
 def configure_extra_cas(directory: str | None) -> int:
     """Returns the number of extra certificate files added (0 if none)."""
     if not directory:
