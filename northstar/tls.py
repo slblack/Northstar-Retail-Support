@@ -68,6 +68,17 @@ def relaxed_strict_context():
     return ctx
 
 
+def _loads_as_ca_bundle(text: str) -> bool:
+    """True if OpenSSL can load every certificate in this PEM text."""
+    import ssl
+
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=text)
+    except (ssl.SSLError, ValueError):
+        return False
+    return True
+
+
 def configure_extra_cas(directory: str | None) -> int:
     """Returns the number of extra certificate files added (0 if none)."""
     if not directory:
@@ -83,10 +94,13 @@ def configure_extra_cas(directory: str | None) -> int:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if PEM_BEGIN in text:
-            extra.append(text.strip())
-        else:
+        if PEM_BEGIN not in text:
             log.warning("Skipped %s: not a PEM certificate (convert DER .cer files to PEM).", path.name)
+            continue
+        if not _loads_as_ca_bundle(text):
+            log.warning("Skipped %s: the certificate data could not be parsed.", path.name)
+            continue
+        extra.append(text.strip())
     if not extra:
         return 0
     bundle = _base_bundle().rstrip() + "\n\n" + "\n\n".join(extra) + "\n"
