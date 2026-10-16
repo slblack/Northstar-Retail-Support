@@ -30,26 +30,59 @@ It is a customer-generated demonstration built from a vendor-provided functional
 
 ## 1. Quick start with Docker (pull from GitHub)
 
-Prerequisite: Docker Desktop (Windows/macOS) or Docker Engine (Linux).
+### For colleagues and clients: the start scripts (recommended)
 
-The image is published to GitHub Container Registry by this repository's GitHub Actions workflow (section 2). Replace `OWNER` with the GitHub account or organisation that owns the repository, **in lower case**.
+You need **Docker Desktop** (Windows or macOS; Apple Silicon and Intel are both supported) and a copy of this repository: on GitHub click **Code → Download ZIP** and unzip it, or `git clone` it. You do not need Python or anything else.
+
+| | Windows | macOS / Linux |
+|---|---|---|
+| **Start** | Double-click `start.cmd`, or in PowerShell: `.\start.ps1` | In Terminal, in the unzipped folder: `bash start.sh` |
+| **Stop** | Double-click `stop.cmd`, or `.\stop.ps1` | `bash stop.sh` |
+
+The start script:
+
+1. checks Docker is running;
+2. if the `certs` folder is empty, checks whether your network inspects HTTPS (for example Cisco Secure Access) and, if so, exports your organisation's inspection CA into `certs` (section 5);
+3. pulls the latest image and replaces any previous container;
+4. mounts this folder's `certs` folder **by full path**, so it works whichever folder you run it from;
+5. waits for the app, reports whether the extra certificates were loaded, and opens **http://127.0.0.1:5065**.
+
+Then click **Setup**, enter your OpenAI and AI Defense keys, and click **Verify** for each. Keys are kept in the `northstar-data` Docker volume, so you enter them once; stopping, restarting and upgrading keep them (`stop.ps1 -DeleteSavedSettings` / `bash stop.sh --delete-saved-settings` removes them).
+
+Options (Windows / macOS-Linux):
+
+| Option | Purpose |
+|---|---|
+| `-Port 5066` / `--port 5066` | Use another port if 5065 is taken. |
+| `-NoPull` / `--no-pull` | Start the copy already downloaded (for example offline). |
+| `-Image <name>` / `--image <name>` | Run a different image, for example `northstar-retail-support:local` after `docker build`. |
+| `-RelaxStrictTls` / `--relax-strict-tls` | Only for section 5, case B. |
+| `-NoCertExport` / `--no-cert-export` | Skip the automatic certificate check. |
+| `-NoBrowser` / `--no-browser` | Do not open the browser. |
+
+If your organisation blocks PowerShell scripts, run the `docker run` command below by hand instead. If you moved to a different network (for example from the office to home without VPN), the certificates in `certs` are harmless; delete them and run the start script again to re-check.
+
+### Manual commands
+
+The image is published to GitHub Container Registry by this repository's GitHub Actions workflow (section 2): `ghcr.io/slblack/northstar-retail-support:latest` (for a fork, replace `slblack` with the owner, **in lower case**).
 
 ```sh
-docker pull ghcr.io/OWNER/northstar-retail-support:latest
+docker pull ghcr.io/slblack/northstar-retail-support:latest
 
 docker run -d --name northstar-retail-support \
   -p 127.0.0.1:5065:5065 \
   -v northstar-data:/data \
-  ghcr.io/OWNER/northstar-retail-support:latest
+  -v "$PWD/certs:/certs:ro" \
+  ghcr.io/slblack/northstar-retail-support:latest
+```
+
+PowerShell uses a back-tick (`` ` ``) instead of `\` for line continuation, or put the command on one line. Use the **full path** to the repository's `certs` folder: `${PWD}` means "the folder PowerShell is currently in", and running from the wrong folder silently mounts an empty folder.
+
+```powershell
+docker run -d --name northstar-retail-support -p 127.0.0.1:5065:5065 -v northstar-data:/data -v "C:\path\to\Northstar-Retail-Support\certs:/certs:ro" ghcr.io/slblack/northstar-retail-support:latest
 ```
 
 Open **http://127.0.0.1:5065** and click **Setup** to enter keys.
-
-PowerShell uses a back-tick (`` ` ``) instead of `\` for line continuation, or put the command on one line:
-
-```powershell
-docker run -d --name northstar-retail-support -p 127.0.0.1:5065:5065 -v northstar-data:/data ghcr.io/OWNER/northstar-retail-support:latest
-```
 
 Important flags:
 
@@ -72,7 +105,7 @@ docker volume rm northstar-data            # deletes saved settings and keys
 
 **Logs:** `docker logs northstar-retail-support` (logs contain run IDs, stage decisions and timings, never keys, prompts or answers).
 
-**Docker Compose** (from a clone of this repository): `docker compose up -d --build`, stop with `docker compose down`. Set `NORTHSTAR_IMAGE=ghcr.io/OWNER/northstar-retail-support:latest` to use the published image instead of building.
+**Docker Compose** (from a clone of this repository): `docker compose up -d --build`, stop with `docker compose down`. Set `NORTHSTAR_IMAGE=ghcr.io/slblack/northstar-retail-support:latest` to use the published image instead of building.
 
 **Pulling without signing in:** new GHCR packages are private. Either make the package public (GitHub → your profile/organisation → *Packages* → `northstar-retail-support` → *Package settings* → *Change visibility*), or sign in first with `docker login ghcr.io -u <github-user>` using a personal access token with `read:packages`.
 
@@ -194,7 +227,9 @@ If your network re-signs HTTPS traffic (common on corporate laptops and VPNs), c
    powershell -ExecutionPolicy Bypass -File scripts\export-network-root-ca.ps1
    ```
 
-   It writes `certs\network-root-ca.pem` and prints the subject and SHA-256 thumbprint (by default for `api.openai.com`; use `-HostName` for another host). Confirm with IT that this is the expected certificate. If the subject is a public CA (for example DigiCert or Google Trust Services) rather than your organisation's, your network is not inspecting that traffic and the problem is elsewhere.
+   On macOS or Linux: `bash scripts/export-network-root-ca.sh`. The start scripts run this automatically when `certs` is empty.
+
+   It writes `certs/network-root-ca.pem` and prints the subject and SHA-256 thumbprint of each CA it keeps (by default for `api.openai.com`; use `-HostName` / `--host` for another host). It keeps the root and long-lived intermediates, and skips short-lived intermediates (they rotate, are sent by the network on every connection, and would cause failures after they expire). Confirm with IT that this is the expected certificate. If the subject is a public CA (for example DigiCert or Google Trust Services) rather than your organisation's, your network is not inspecting that traffic and the problem is elsewhere.
 2. Recreate the container with the folder mounted, from the repository folder:
 
    ```powershell
@@ -362,7 +397,9 @@ northstar/
   templates/index.html   page and Setup dialog
   static/app.css, app.js, logo.svg
 tests/                   offline pytest suite (fake adapters)
-scripts/                 run-local.ps1, run-local.sh, export-network-root-ca.ps1
+start.ps1, start.cmd, start.sh   start the container (Windows / macOS-Linux)
+stop.ps1, stop.cmd, stop.sh      stop it (saved keys are kept)
+scripts/                 run-local.ps1, run-local.sh, export-network-root-ca.ps1, export-network-root-ca.sh
 certs/README.md          where to put optional extra CA certificates
 .github/workflows/docker-publish.yml   test + publish to GHCR
 Dockerfile, .dockerignore, compose.yaml
