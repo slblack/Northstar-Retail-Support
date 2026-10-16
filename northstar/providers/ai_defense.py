@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional, Sequence
 import requests
 
 from ..config import AI_DEFENSE_REGION_HOSTS
-from .errors import ProviderError, find_tls_error
+from .errors import ProviderError, find_tls_error, tls_message
 
 INSPECT_PATH = "/api/v1/inspect/chat"
 CONNECT_TIMEOUT = 5.0
@@ -173,12 +173,7 @@ class AIDefenseClient:
         except requests.exceptions.Timeout:
             return done(InspectionResult("error", error=ProviderError("timeout", "AI Defense inspection timed out.")))
         except requests.exceptions.SSLError as exc:
-            msg = (
-                "TLS certificate verification to AI Defense failed. If your network inspects HTTPS traffic, "
-                "supply your organisation's root CA (see README). Verification was not disabled."
-                if find_tls_error(exc)
-                else "TLS error while contacting AI Defense."
-            )
+            msg = tls_message("AI Defense", exc) if find_tls_error(exc) else "TLS error while contacting AI Defense."
             return done(InspectionResult("error", error=ProviderError("tls", msg)))
         except requests.exceptions.ConnectionError:
             return done(
