@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="referrer" content="no-referrer">
+  <title>Northstar Retail Support</title>
+  <link rel="icon" href="{{ url_for('static', filename='logo.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="brand">
+      <img src="{{ url_for('static', filename='logo.svg') }}" alt="" width="40" height="40">
+      <div>
+        <span class="brand-name">Northstar</span>
+        <span class="brand-sub">Standalone customer support</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span class="conn-summary" id="conn-summary" aria-live="polite">Checking configuration…</span>
+      <button type="button" class="btn btn-setup" id="open-setup" aria-haspopup="dialog">Setup</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="intro" aria-labelledby="intro-heading">
+      <h1 id="intro-heading">How can we help today?</h1>
+      <p>Ask about Northstar products, orders, delivery, returns, promotions or keeping your account safe.
+        Each message is answered twice — once by the model on its own, and once through Cisco AI Defense
+        inspection — so you can compare the two journeys side by side.</p>
+    </section>
+
+    <section class="composer card" aria-labelledby="composer-heading">
+      <h2 id="composer-heading" class="visually-hidden">Customer message</h2>
+      <form id="compose-form" novalidate>
+        <div class="field">
+          <label for="suggestion">Suggested question</label>
+          <select id="suggestion" aria-describedby="scenario-note">
+            <option value="">Write your own message…</option>
+            {% set ns = namespace(cat=None) %}
+            {% for s in suggestions %}
+              {% if s.category != ns.cat %}
+                {% if ns.cat is not none %}</optgroup>{% endif %}
+                <optgroup label="{{ s.category }}">
+                {% set ns.cat = s.category %}
+              {% endif %}
+              <option value="{{ s.id }}">{{ s.title }}</option>
+            {% endfor %}
+            {% if ns.cat is not none %}</optgroup>{% endif %}
+          </select>
+        </div>
+        <div class="scenario-note" id="scenario-note" aria-live="polite">
+          <p class="note-empty">Choose a suggested question to see its scenario, or type your own. Free-text messages are not scored unless they exactly match a defined evaluation case.</p>
+        </div>
+        <div class="field">
+          <label for="question">Customer message</label>
+          <textarea id="question" name="question" rows="4" maxlength="{{ max_chars }}" required
+                    aria-describedby="char-count" placeholder="e.g. My order tracking hasn’t updated in four days."></textarea>
+          <div class="field-foot">
+            <span id="char-count" class="char-count">0 / {{ max_chars }} characters</span>
+            <span id="label-chip" class="label-chip" hidden></span>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn btn-ghost" id="clear-btn">Clear</button>
+          <button type="submit" class="btn btn-primary" id="send-btn">Send message</button>
+        </div>
+        <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section class="metrics card" aria-labelledby="metrics-heading">
+      <h2 id="metrics-heading">Session metrics <span class="muted small">(this browser tab only)</span></h2>
+      <dl class="metric-grid">
+        <div><dt>Scored runs</dt><dd id="m-scored">0</dd></div>
+        <div><dt>Matches</dt><dd id="m-match">0</dd></div>
+        <div><dt>False positives</dt><dd id="m-fp">0</dd></div>
+        <div><dt>Misses</dt><dd id="m-miss">0</dd></div>
+        <div><dt>Unscored</dt><dd id="m-unscored">0</dd></div>
+      </dl>
+      <p class="muted small">Scoring compares the protected path’s live AI Defense outcome with the evaluation annotation of an exactly matching suggested or evaluation question. Provider errors and free-text questions are not scored. Model and policy behaviour can vary between runs.</p>
+    </section>
+
+    <div class="run-meta" id="run-meta" hidden>
+      <span>Run <code id="run-id"></code></span>
+      <span>Model <code id="run-model"></code></span>
+      <span>Shared input SHA-256 <code id="run-digest" class="digest"></code> <span id="digest-match" class="digest-match"></span></span>
+    </div>
+
+    <div class="paths">
+      {% for p in [
+        {'id': 'baseline', 'title': 'Without AI Defense', 'sub': 'The model answers directly, using its own built-in safety behaviour.',
+         'stages': [('customer','Customer'),('knowledge','Store knowledge'),('model','Model')]},
+        {'id': 'protected', 'title': 'With AI Defense', 'sub': 'Every hop is inspected by your AI Defense policy; any block stops the journey.',
+         'stages': [('customer','Customer'),('input','Input shield'),('knowledge','Store knowledge'),('context','Context shield'),('model','Model'),('output','Output shield')]}
+      ] %}
+      <section class="path card path-{{ p.id }}" id="path-{{ p.id }}" aria-labelledby="{{ p.id }}-heading">
+        <header class="path-head">
+          <h2 id="{{ p.id }}-heading">{{ p.title }}</h2>
+          <p class="path-sub">{{ p.sub }}</p>
+        </header>
+        <ol class="journey" aria-label="{{ p.title }} journey">
+          {% for sid, label in p.stages %}
+          <li class="stage" data-stage="{{ sid }}" data-status="idle">
+            <span class="stage-dot" aria-hidden="true"></span>
+            <span class="stage-label">{{ label }}</span>
+            <span class="stage-state">Waiting</span>
+          </li>
+          {% endfor %}
+        </ol>
+        <div class="outcome" data-state="idle">
+          <p class="outcome-badge">No run yet</p>
+          <div class="answer" tabindex="-1"><p class="muted">Send a message to see this path’s answer.</p></div>
+          <p class="refusal-note" hidden>Possible model refusal — <em>heuristic approximation based on wording, not a provider signal.</em></p>
+        </div>
+        <dl class="stats">
+          <div><dt>Input tokens</dt><dd data-stat="in">—</dd></div>
+          <div><dt>Output tokens</dt><dd data-stat="out">—</dd></div>
+          <div><dt>Total tokens</dt><dd data-stat="total">—</dd></div>
+          <div><dt>Generation</dt><dd data-stat="gen">—</dd></div>
+          <div><dt>Inspection</dt><dd data-stat="insp">—</dd></div>
+          <div><dt>Path total</dt><dd data-stat="time">—</dd></div>
+        </dl>
+        <details class="evidence">
+          <summary>Evidence &amp; stage trace</summary>
+          <div class="trace"><p class="muted">No trace yet.</p></div>
+        </details>
+      </section>
+      {% endfor %}
+    </div>
+
+    <section class="notice card" aria-labelledby="notice-heading">
+      <h2 id="notice-heading">About this demo</h2>
+      <ul>
+        <li>This is a fictional retail-support demonstration using synthetic data. It is not connected to any real order or customer system.</li>
+        <li>Sending a message transmits it, the system instructions and retrieved store-policy excerpts to OpenAI, and (on the protected path) to Cisco AI Defense. A fully allowed run makes two model generations and three inspection calls; provider costs, quotas and data policies apply.</li>
+        <li>Answers on the two paths are generated independently from identical inputs and can differ. The path without AI Defense still has the model’s own safety behaviour.</li>
+        <li>Suggested-question labels are evaluation annotations only. Live AI Defense responses alone decide what is blocked.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>Northstar Retail Support demo v{{ version }} · runs locally on this computer</span>
+  </footer>
+
+  <dialog id="setup-dialog" aria-labelledby="setup-title" aria-describedby="setup-desc">
+    <form id="setup-form" method="dialog" novalidate>
+      <div class="dlg-head">
+        <div>
+          <p class="kicker">CONNECTIONS</p>
+          <h2 id="setup-title">API settings</h2>
+        </div>
+        <button type="button" class="icon-btn" id="setup-close" aria-label="Close settings">×</button>
+      </div>
+      <p id="setup-desc" class="dlg-desc">Keys are saved only on this computer, in this app’s local settings file, and are never shown again after saving. Leave a key field blank to keep the saved key. Verifying contacts the provider but does not save.</p>
+
+      <fieldset class="dlg-group">
+        <legend>OpenAI</legend>
+        <label for="openai-key">OpenAI API key</label>
+        <input type="password" id="openai-key" autocomplete="off" spellcheck="false" maxlength="512"
+               aria-describedby="openai-key-status">
+        <p class="key-status" id="openai-key-status">Not configured</p>
+        <label for="openai-model">Model identifier</label>
+        <input type="text" id="openai-model" autocomplete="off" spellcheck="false" maxlength="100" aria-describedby="openai-model-help">
+        <p class="help" id="openai-model-help">Used identically on both paths. Must be an OpenAI API model that supports the Responses API (not a ChatGPT or Codex app alias). The app never switches models on error.</p>
+        <div class="verify-row">
+          <button type="button" class="btn btn-outline" id="verify-openai">Verify API key</button>
+          <p class="verify-result" id="verify-openai-result" role="status" aria-live="polite"></p>
+        </div>
+      </fieldset>
+
+      <fieldset class="dlg-group">
+        <legend>Cisco AI Defense</legend>
+        <label for="aid-key">AI Defense API key</label>
+        <input type="password" id="aid-key" autocomplete="off" spellcheck="false" maxlength="512"
+               aria-describedby="aid-key-status">
+        <p class="key-status" id="aid-key-status">Not configured</p>
+        <label for="aid-region">Region</label>
+        <select id="aid-region" aria-describedby="aid-region-help">
+          <option value="us">US — us.api.inspect.aidefense.security.cisco.com</option>
+          <option value="eu">EU — eu.api.inspect.aidefense.security.cisco.com</option>
+          <option value="ap">APAC — ap.api.inspect.aidefense.security.cisco.com</option>
+        </select>
+        <p class="help" id="aid-region-help">Must match the region of your AI Defense tenant. The key needs an inspection connection with an enabled policy attached; a management API key is not used.</p>
+        <label for="aid-conn">Connection name (optional reminder)</label>
+        <input type="text" id="aid-conn" autocomplete="off" maxlength="80" aria-describedby="aid-conn-help">
+        <p class="help" id="aid-conn-help">For your reference only; it is not used to authenticate.</p>
+        <div class="verify-row">
+          <button type="button" class="btn btn-outline" id="verify-aid">Verify API key</button>
+          <p class="verify-result" id="verify-aid-result" role="status" aria-live="polite"></p>
+        </div>
+      </fieldset>
+
+      <fieldset class="dlg-group">
+        <legend>Policy Studio documents</legend>
+        <p class="help">Downloads <code>northstar-retail-policy-studio.zip</code> containing a policy draft (<code>{{ policy_name }}</code>) and 53 evaluation questions (<code>{{ csv_name }}</code>). These are source materials for creating and evaluating a policy in your own Policy Studio workflow — not a deployable policy configuration, and the CSV columns may need mapping to your import format.</p>
+        <a class="btn btn-outline" id="download-docs" href="{{ url_for('download_zip') }}" download>Download Policy Studio documents</a>
+      </fieldset>
+
+      <p class="save-status" id="save-status" role="status" aria-live="polite"></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn btn-ghost-dark" id="setup-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="setup-save">Save settings</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script id="suggestions-data" type="application/json">{{ suggestions | tojson }}</script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>
