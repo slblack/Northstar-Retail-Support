@@ -5,25 +5,31 @@
 
 .DESCRIPTION
   Opens a TLS connection to the host (default api.openai.com) and reads the certificate chain that
-  Windows builds for it using its own trust store. It writes every CA certificate in that chain
-  (intermediates and root) - never the site's own certificate - as PEM. If Windows cannot supply
-  the issuing CAs, it looks in the Windows certificate stores for the issuer by name. It changes no
-  system settings and sends no data beyond a normal TLS handshake.
+  Windows builds for it. It writes the chain's root CA and any long-lived intermediate CAs as PEM -
+  never the site's own certificate, and not short-lived intermediates (which rotate and are sent by
+  the network during each connection anyway). If Windows does not supply the issuing CAs, it looks
+  in the Windows certificate stores by name. It changes no system settings and sends no data beyond
+  a normal TLS handshake.
 
   Confirm with your IT/security team that the exported certificates are your organisation's
   expected inspection CAs before trusting them.
+
+.PARAMETER SkipIfPublic
+  Exit without writing anything if the site's certificate looks publicly issued (traffic not inspected).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\scripts\export-network-root-ca.ps1
 #>
 param(
   [string]$HostName = "api.openai.com",
-  [string]$OutFile = (Join-Path $PSScriptRoot "..\certs\network-root-ca.pem")
+  [int]$Port = 443,
+  [string]$OutFile = (Join-Path $PSScriptRoot "..\certs\network-root-ca.pem"),
+  [int]$MinIntermediateDays = 90,
+  [switch]$SkipIfPublic
 )
 
 $ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Security
-$X509 = [System.Security.Cryptography.X509Certificates.X509Certificate2]
+$PublicIssuers = "DigiCert|GlobalSign|Google Trust|Let's Encrypt|ISRG|Sectigo|Baltimore|Amazon|Microsoft|Entrust|GoDaddy|Starfield|Comodo|USERTrust|Cloudflare"
 
 function Test-IsCA($cert) {
   foreach ($ext in $cert.Extensions) {
@@ -31,7 +37,6 @@ function Test-IsCA($cert) {
       return $ext.CertificateAuthority
     }
   }
-  # No basic constraints: treat self-signed certificates as CAs, anything else as not.
   return ($cert.Subject -eq $cert.Issuer)
 }
 
@@ -51,11 +56,15 @@ function Find-InStores($subject) {
 $script:handshakeChain = @()
 $callback = [System.Net.Security.RemoteCertificateValidationCallback]{
   param($sender, $certificate, $chain, $sslPolicyErrors)
-  if ($chain) { foreach ($el in $chain.ChainElements) { $script:handshakeChain += (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($el.Certificate)) } }
+  if ($chain) {
+    foreach ($el in $chain.ChainElements) {
+      $script:handshakeChain += (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($el.Certificate))
+    }
+  }
   # Accept only so the chain can be read; nothing is sent over this connection.
   return $true
 }
-$client = New-Object System.Net.Sockets.TcpClient($HostName, 443)
+$client = New-Object System.Net.Sockets.TcpClient($HostName, $Port)
 try {
   $ssl = New-Object System.Net.Security.SslStream($client.GetStream(), $false, $callback)
   $ssl.AuthenticateAsClient($HostName)
@@ -64,10 +73,21 @@ try {
   $client.Dispose()
 }
 
+Write-Host "Site certificate presented for ${HostName}:" $leaf.Subject
+Write-Host "  issued by:" $leaf.Issuer
+
+if ($SkipIfPublic -and $leaf.Issuer -match $PublicIssuers) {
+  Write-Host "This looks like a publicly issued certificate, so your network is not inspecting this traffic."
+  Write-Host "No extra CA certificates are needed. Nothing was written."
+  exit 0
+}
+
 # 2. Collect CA certificates from the handshake chain, then from a fresh local chain build.
-$cas = @()
+$script:cas = @()
 function Add-CA($c) {
-  if ($c.Thumbprint -ne $leaf.Thumbprint -and (Test-IsCA $c) -and -not ($script:cas | Where-Object { $_.Thumbprint -eq $c.Thumbprint })) { $script:cas += $c }
+  if ($c.Thumbprint -ne $leaf.Thumbprint -and (Test-IsCA $c) -and -not ($script:cas | Where-Object { $_.Thumbprint -eq $c.Thumbprint })) {
+    $script:cas += $c
+  }
 }
 foreach ($c in $script:handshakeChain) { Add-CA $c }
 $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
@@ -84,10 +104,10 @@ for ($i = 0; $i -lt 5 -and $current.Subject -ne $current.Issuer; $i++) {
   $current = $issuer
 }
 
-# 4. Last resort: any root in the Windows stores whose name matches the issuing organisation's
-#    inspection product (for example "Cisco Secure Access" or "Cisco Umbrella").
+# 4. Last resort: any root in the Windows stores whose name matches the inspection product
+#    named in the issuer (for example "Cisco Secure Access" or "Cisco Umbrella").
 if (-not ($script:cas | Where-Object { $_.Subject -eq $_.Issuer })) {
-  $hint = if ($leaf.Issuer -match "CN=([^,]+?)\s+(Secondary\s+)?Sub\s*CA") { $Matches[1] } else { $null }
+  $hint = if ($leaf.Issuer -match "CN=([^,]+?)\s+(Secondary\s+|Primary\s+)?Sub\s*CA") { $Matches[1] } else { $null }
   if ($hint) {
     Write-Host "Searching Windows certificate stores for roots matching '$hint'..."
     foreach ($loc in "CurrentUser", "LocalMachine") {
@@ -100,8 +120,6 @@ if (-not ($script:cas | Where-Object { $_.Subject -eq $_.Issuer })) {
   }
 }
 
-Write-Host "Site certificate presented for ${HostName}:" $leaf.Subject
-Write-Host "  issued by:" $leaf.Issuer
 if ($script:cas.Count -eq 0) {
   Write-Host ""
   Write-Host "Could not find the issuing CA certificates for this site in Windows." -ForegroundColor Yellow
@@ -109,26 +127,36 @@ if ($script:cas.Count -eq 0) {
   exit 1
 }
 
-$publicRoots = "DigiCert|GlobalSign|Google Trust|Let's Encrypt|ISRG|Sectigo|Baltimore|Amazon|Microsoft"
-$pem = ""
+# 5. Keep roots and long-lived intermediates. Short-lived intermediates rotate and are sent by the
+#    network on every connection; storing them would cause failures once they expire.
+$haveRoot = [bool]($script:cas | Where-Object { $_.Subject -eq $_.Issuer })
+$cutoff = (Get-Date).AddDays($MinIntermediateDays)
+$keep = @()
 Write-Host ""
-Write-Host "CA certificates written (confirm these with IT):"
 foreach ($c in $script:cas) {
-  $b64 = [Convert]::ToBase64String($c.RawData, [Base64FormattingOptions]::InsertLineBreaks)
-  $pem += "# Subject: $($c.Subject)`n# Issuer:  $($c.Issuer)`n-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----`n`n"
-  $kind = if ($c.Subject -eq $c.Issuer) { "root" } else { "intermediate" }
-  Write-Host " - [$kind]" $c.Subject
-  Write-Host "   SHA-256:" ($c.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256)) " expires:" $c.NotAfter.ToString("yyyy-MM-dd")
+  $isRoot = $c.Subject -eq $c.Issuer
+  $kind = if ($isRoot) { "root" } else { "intermediate" }
+  $shortLived = (-not $isRoot) -and $haveRoot -and ($c.NotAfter -lt $cutoff)
+  $sha = $c.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+  if ($shortLived) {
+    Write-Host " - skipped [$kind, expires $($c.NotAfter.ToString('yyyy-MM-dd'))]" $c.Subject -ForegroundColor DarkGray
+  } else {
+    $keep += $c
+    Write-Host " - [$kind]" $c.Subject
+    Write-Host "   SHA-256:" $sha " expires:" $c.NotAfter.ToString("yyyy-MM-dd")
+  }
 }
-if (($script:cas | Where-Object { $_.Subject -eq $_.Issuer }).Count -eq 0) {
+if (-not $haveRoot) {
   Write-Host "Note: no self-signed root was found; the intermediates alone are usually sufficient." -ForegroundColor Yellow
 }
-if ($leaf.Issuer -match $publicRoots) {
-  Write-Host "Note: this site's issuer looks like a public CA, so this traffic may not be inspected." -ForegroundColor Yellow
-}
 
+$pem = ""
+foreach ($c in $keep) {
+  $b64 = [Convert]::ToBase64String($c.RawData, [Base64FormattingOptions]::InsertLineBreaks)
+  $pem += "# Subject: $($c.Subject)`n# Issuer:  $($c.Issuer)`n-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----`n`n"
+}
 $full = [System.IO.Path]::GetFullPath($OutFile)
 New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
 [System.IO.File]::WriteAllText($full, $pem)
 Write-Host ""
-Write-Host "Written to $full"
+Write-Host "CA certificates written to $full (confirm these with IT)."
