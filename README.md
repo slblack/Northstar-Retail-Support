@@ -145,6 +145,7 @@ Environment variables:
 | `NORTHSTAR_EXTRA_CA_DIR` | unset (`/certs` in the container) | Folder of extra PEM CA certificates |
 | `NORTHSTAR_ALLOWED_HOSTS` | unset | Extra `Host` header names to accept (comma separated). Loopback names are always accepted. |
 | `OPENAI_MAX_OUTPUT_TOKENS` | `800` | Output token cap per answer (64–4000) |
+| `NORTHSTAR_TLS_RELAX_X509_STRICT` | unset | Opt-in for corporate CAs that fail Python 3.13's strict X.509 profile (section 5, case B) |
 
 ---
 
@@ -183,24 +184,32 @@ Each comparison takes **one configuration snapshot** at the start, so saving new
 
 ## 5. Corporate networks and TLS inspection
 
-If your network re-signs HTTPS traffic (common on corporate laptops and VPNs), calls to OpenAI and AI Defense fail with *TLS certificate verification failed*. The app never disables verification. Instead, give it your organisation's root CA:
+If your network re-signs HTTPS traffic (common on corporate laptops and VPNs), calls fail with *TLS certificate verification to … failed (reason)*. Windows trusts your organisation's inspection certificate, but the Linux container does not. Your network may inspect some destinations and not others: for example, AI Defense can work while OpenAI fails. The app never disables verification. The reason in brackets tells you which case you are in.
 
-1. Get the root certificate as PEM from your IT/security team. On Windows you can also export the root presented on your network with:
+**Case A — `unable to get local issuer certificate` (or `self-signed certificate in certificate chain`): give the container your organisation's root CA.**
+
+1. Get the root certificate as PEM from your IT/security team, or export the one your network presents for OpenAI:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\export-network-root-ca.ps1
    ```
 
-   It writes `certs\network-root-ca.pem` and prints the subject and SHA-256 thumbprint. Confirm with IT that this is the expected certificate.
-2. Mount the folder into the container:
+   It writes `certs\network-root-ca.pem` and prints the subject and SHA-256 thumbprint (by default for `api.openai.com`; use `-HostName` for another host). Confirm with IT that this is the expected certificate. If the subject is a public CA (for example DigiCert or Google Trust Services) rather than your organisation's, your network is not inspecting that traffic and the problem is elsewhere.
+2. Recreate the container with the folder mounted, from the repository folder:
 
    ```powershell
-   docker run -d --name northstar-retail-support -p 127.0.0.1:5065:5065 -v northstar-data:/data -v "${PWD}\certs:/certs:ro" ghcr.io/OWNER/northstar-retail-support:latest
+   docker rm -f northstar-retail-support
+   docker run -d --name northstar-retail-support -p 127.0.0.1:5065:5065 -v northstar-data:/data -v "${PWD}\certs:/certs:ro" northstar-retail-support:local
    ```
 
-   Running without Docker: set `NORTHSTAR_EXTRA_CA_DIR` to the folder.
+   Use your `ghcr.io/...` image name instead of `northstar-retail-support:local` if you pulled it. Saved keys survive because they are in the `northstar-data` volume. Running without Docker: set `NORTHSTAR_EXTRA_CA_DIR` to the folder.
+3. `docker logs northstar-retail-support` should show `Added 1 extra CA certificate file(s)`. Then click **Verify** for OpenAI in Setup.
 
 At startup the app appends every PEM file in that folder to the standard trust bundle and uses the result for both providers. DER-encoded `.cer` files are skipped with a warning; convert them with `certutil -encode in.cer out.pem` on Windows or `openssl x509 -inform der -in in.cer -out out.pem`.
+
+**Case B — the reason mentions `key usage`, `basic constraints` or `authority key identifier`: the CA is found but fails Python 3.13's strict checks.**
+
+Python 3.13 rejects some certificates that older versions and browsers accept (`VERIFY_X509_STRICT`), and some corporate inspection CAs are issued without these fields. After confirming the CA with IT, opt in by adding `-e NORTHSTAR_TLS_RELAX_X509_STRICT=1` to the `docker run` command (alongside the `/certs` mount). This applies to the OpenAI connection, which uses Python's strict defaults; the AI Defense client does not apply the strict profile. A trusted chain to a CA you supplied (or a standard root), valid dates and a matching hostname are still required; only the extra strict-profile checks are relaxed. Startup logs a warning while it is on. A better long-term fix is for IT to reissue the inspection CA with standard extensions.
 
 ---
 
@@ -284,9 +293,9 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-It covers: start-up without keys; the page, Setup markup, suggestions and ZIP; retrieval quality, the fallback and the untrusted-context markers; identical inputs, model and digests on both paths; zero inspections on the baseline; inspection order and payloads; input and context blocks preventing generation; output blocks never exposing the answer (response body and logs checked); fail-closed handling of missing, unknown or malformed decisions, timeouts, network and authentication errors; labels never driving enforcement; match, false-positive and miss scoring; edited questions becoming unlabelled; tokens and timings taken from adapters, never fabricated; provider errors left unscored; key persistence, blank-preserves, replacement, restart precedence, atomic writes, `0600` permissions and corrupt-file protection; masking; cross-origin, CSRF, Host, preflight, content-type and size rejections; safe error messages; the real OpenAI SDK's exception types mapped correctly; AI Defense HTTP and transport error mapping; and the extra-CA bundle.
+It covers: start-up without keys; the page, Setup markup, suggestions and ZIP; retrieval quality, the fallback and the untrusted-context markers; identical inputs, model and digests on both paths; zero inspections on the baseline; inspection order and payloads; input and context blocks preventing generation; output blocks never exposing the answer (response body and logs checked); fail-closed handling of missing, unknown or malformed decisions, timeouts, network and authentication errors; labels never driving enforcement; match, false-positive and miss scoring; edited questions becoming unlabelled; tokens and timings taken from adapters, never fabricated; provider errors left unscored; key persistence, blank-preserves, replacement, restart precedence, atomic writes, `0600` permissions and corrupt-file protection; masking; cross-origin, CSRF, Host, preflight, content-type and size rejections; safe error messages; the real OpenAI SDK's exception types mapped correctly; AI Defense HTTP and transport error mapping; the extra-CA bundle; TLS failure reasons; and the strict-profile opt-in. Separately, the real OpenAI SDK was run against local HTTPS servers signed by a test "corporate" CA: it fails without the CA, connects with a well-formed CA mounted, fails with a CA lacking key usage, connects with that CA plus the opt-in, and still fails with the opt-in but no CA.
 
-**Verified while generating this project (14 Oct 2026):** 117 tests passing on Python 3.13.16 with Flask 3.1.3, Werkzeug 3.1.8, requests 2.34.2 and the official OpenAI SDK 3.31.0 (`httpx2`/`httpcore2` 2.13.1, pydantic 2.13.5). The real server was started without keys, including the automatic 5065 → 5066 fallback. The rendered page was inspected in headless Chromium at 1280 px and 390 px with fake providers: stable layout, no horizontal scroll, keyboard-opened Setup with focus trapped, Escape clearing key fields and restoring focus, and adversarial HTML/script text rendered inertly.
+**Verified while generating this project (14–16 Oct 2026):** 122 tests passing on Python 3.13.16 with Flask 3.1.3, Werkzeug 3.1.8, requests 2.34.2 and the official OpenAI SDK 3.31.0 (`httpx2`/`httpcore2` 2.13.1, pydantic 2.13.5). The real server was started without keys, including the automatic 5065 → 5066 fallback. The rendered page was inspected in headless Chromium at 1280 px and 390 px with fake providers: stable layout, no horizontal scroll, keyboard-opened Setup with focus trapped, Escape clearing key fields and restoring focus, and adversarial HTML/script text rendered inertly.
 
 **Not verified while generating** (the build environment could not reach PyPI and had no Docker daemon):
 
