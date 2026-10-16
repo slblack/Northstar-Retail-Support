@@ -7,7 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
-from .errors import ProviderError, find_tls_error
+from .errors import ProviderError, find_tls_error, tls_message
+from ..tls import relaxed_strict_context
 
 OPENAI_TIMEOUT_SECONDS = 45.0
 OPENAI_MAX_RETRIES = 1  # bounded: one retry for transient failures, never unbounded
@@ -36,12 +37,7 @@ def classify_openai_exception(exc: BaseException) -> ProviderError:
     import openai  # local import keeps module import cheap for tests
 
     if find_tls_error(exc):
-        return ProviderError(
-            "tls",
-            "TLS certificate verification to OpenAI failed. If your network inspects HTTPS traffic, "
-            "supply your organisation's root CA (see README: Corporate TLS inspection). "
-            "Verification was not disabled.",
-        )
+        return ProviderError("tls", tls_message("OpenAI", exc))
     if isinstance(exc, openai.APITimeoutError):
         return ProviderError("timeout", "OpenAI did not respond before the timeout. Try again shortly.")
     if isinstance(exc, openai.APIConnectionError):
@@ -106,7 +102,13 @@ class OpenAIAdapter:
             return self._client_factory(api_key=api_key, timeout=self.timeout, max_retries=self.max_retries)
         import openai
 
-        return openai.OpenAI(api_key=api_key, timeout=self.timeout, max_retries=self.max_retries)
+        kwargs = {"api_key": api_key, "timeout": self.timeout, "max_retries": self.max_retries}
+        ctx = relaxed_strict_context()
+        if ctx is not None:
+            # Opt-in only: same trust bundle, chain and hostname checks; Python 3.13's extra
+            # VERIFY_X509_STRICT profile checks are relaxed (see northstar/tls.py).
+            kwargs["http_client"] = openai.DefaultHttpxClient(verify=ctx, timeout=self.timeout)
+        return openai.OpenAI(**kwargs)
 
     def generate(
         self, api_key: str, model: str, messages: Sequence[dict], max_output_tokens: int
