@@ -1,0 +1,16 @@
+# docker compose up -d   → http://127.0.0.1:5065
+# Set NORTHSTAR_IMAGE to use a different image, e.g. ghcr.io/<owner>/northstar-retail-support:latest
+services:
+  northstar:
+    image: ${NORTHSTAR_IMAGE:-northstar-retail-support:local}
+    build: .
+    container_name: northstar-retail-support
+    ports:
+      - "127.0.0.1:${NORTHSTAR_HOST_PORT:-5065}:5065"   # loopback only — never expose to the LAN
+    volumes:
+      - northstar-data:/data
+      - ./certs:/certs:ro
+    restart: "no"
+
+volumes:
+  northstar-data:
