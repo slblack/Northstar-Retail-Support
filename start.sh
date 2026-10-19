@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Ensure Docker Desktop CLI is available on macOS
+if [[ "$OSTYPE" == darwin* ]]; then
+  export PATH="/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:$PATH"
+fi
+
 # Starts Northstar Retail Support in Docker on this computer (macOS / Linux).
 #
 #   bash start.sh [--port 5065] [--image IMAGE] [--no-pull] [--no-cert-export]
@@ -31,7 +36,7 @@ while [ $# -gt 0 ]; do
     --no-cert-export) CERT_EXPORT=0; shift ;;
     --relax-strict-tls) RELAX=1; shift ;;
     --no-browser) BROWSER=0; shift ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '7,17p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1 (see: bash start.sh --help)" >&2; exit 2 ;;
   esac
 done
